@@ -62,12 +62,28 @@ if torch.isnan(got).any() or rel > 5e-4:
 else:
     print(f"PASS  bug 2   complex_mul DRAM then L1 b   rel={rel:.3e}")
 
-# Bug 3: rank-3 input used to come back as (4, 32768).
-re, im = ttnn.experimental.fft(to_dev(torch.randn(2, 2, 32768)))
-if tuple(re.shape) == (2, 2, 32768) and tuple(im.shape) == (2, 2, 32768):
-    print(f"PASS  bug 3   shape {tuple(re.shape)}")
-else:
-    print(f"FAIL  bug 3   real={tuple(re.shape)} imag={tuple(im.shape)}")
+def compare_fft(label, host, tol):
+    """Device fft versus torch.fft.fft on the CPU. Relative error over the whole tensor."""
+    ref = torch.fft.fft(host.to(torch.complex64), dim=-1)
+    re, im = ttnn.experimental.fft(to_dev(host))
+    got = torch.complex(ttnn.to_torch(re).to(torch.float32), ttnn.to_torch(im).to(torch.float32))
+    rel = (torch.linalg.norm(got - ref) / torch.linalg.norm(ref).clamp_min(1e-12)).item()
+    shape_ok = tuple(re.shape) == tuple(host.shape) and tuple(im.shape) == tuple(host.shape)
+    status = "PASS" if shape_ok and rel < tol else "FAIL"
+    print(f"{status}  {label}  shape={tuple(re.shape)}  rel_vs_cpu={rel:.3e}  tol={tol:.0e}")
+    # First four bins of the first row, so the numbers can be read next to the CPU result.
+    got_row = got.reshape(-1, host.shape[-1])[0, :4]
+    ref_row = ref.reshape(-1, host.shape[-1])[0, :4]
+    for i in range(4):
+        print(f"      bin {i}: device={got_row[i].item(): .6f}  cpu={ref_row[i].item(): .6f}")
+
+
+# Bug 3, plus a few supported lengths. Each one is compared with torch.fft on the CPU.
+torch.manual_seed(0)
+compare_fft("cpu  Stockham N=256", torch.randn(1, 256), 5e-4)
+compare_fft("cpu  two-pass N=4096", torch.randn(1, 4096), 1e-3)
+compare_fft("bug 3 rank-3 (2, 2, 32768)", torch.randn(2, 2, 32768), 1e-3)
+compare_fft("cpu  Bluestein N=100", torch.randn(1, 100), 5e-3)
 
 # Bug 4: non-power-of-two batch must say to pad, not to call ttnn.experimental.fft again.
 expect_error(
