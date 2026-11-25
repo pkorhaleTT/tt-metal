@@ -23,6 +23,7 @@ from markidis_matmul_device import (
     markidis3_matmul,
     bf16_matmul_baseline,
     _rel_l2,
+    _fp32_dtype,
 )
 
 
@@ -118,11 +119,11 @@ def self_test(device):
         # It takes real input; for a complex input we use the two-input form.
         try:
             tt_re = ttnn.from_torch(
-                x.real.reshape(1, N), dtype=ttnn.float32,
+                x.real.reshape(1, N), dtype=_fp32_dtype(),
                 layout=ttnn.ROW_MAJOR_LAYOUT, device=device,
             )
             tt_im = ttnn.from_torch(
-                x.imag.reshape(1, N), dtype=ttnn.float32,
+                x.imag.reshape(1, N), dtype=_fp32_dtype(),
                 layout=ttnn.ROW_MAJOR_LAYOUT, device=device,
             )
             re_out, im_out = ttnn.experimental.fft(tt_re, tt_im)

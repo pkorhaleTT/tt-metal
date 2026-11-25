@@ -25,6 +25,7 @@ from markidis_matmul_device import (
     markidis3_matmul,
     bf16_matmul_baseline,
     _rel_l2,
+    _fp32_dtype,
 )
 from markidis_fft_1d_device import (
     dft_matrix_torch,
@@ -56,9 +57,9 @@ def bench_ttnn_native(device, N, x_complex):
     x_i = x_complex.imag.reshape(1, N).contiguous()
 
     def once():
-        tt_re = ttnn.from_torch(x_r, dtype=ttnn.float32,
+        tt_re = ttnn.from_torch(x_r, dtype=_fp32_dtype(),
                                 layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
-        tt_im = ttnn.from_torch(x_i, dtype=ttnn.float32,
+        tt_im = ttnn.from_torch(x_i, dtype=_fp32_dtype(),
                                 layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
         re_out, im_out = ttnn.experimental.fft(tt_re, tt_im)
         ttnn.synchronize_device(device)

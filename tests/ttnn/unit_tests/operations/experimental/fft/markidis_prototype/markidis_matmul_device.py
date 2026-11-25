@@ -26,6 +26,27 @@ import ttnn
 
 
 # ---------------------------------------------------------------------------- #
+# ttnn dtype resolver (works across ttnn versions)                             #
+# ---------------------------------------------------------------------------- #
+
+def _bf16_dtype():
+    """Return ttnn bfloat16 dtype, tolerating different ttnn API versions."""
+    if hasattr(ttnn, "bfloat16"):
+        return ttnn.bfloat16
+    if hasattr(ttnn, "DataType"):
+        return ttnn.DataType.BFLOAT16
+    raise RuntimeError("Cannot locate ttnn bfloat16 dtype in this ttnn build")
+
+
+def _fp32_dtype():
+    if hasattr(ttnn, "float32"):
+        return ttnn.float32
+    if hasattr(ttnn, "DataType"):
+        return ttnn.DataType.FLOAT32
+    raise RuntimeError("Cannot locate ttnn float32 dtype in this ttnn build")
+
+
+# ---------------------------------------------------------------------------- #
 # bf16 split helpers (host-side)                                               #
 # ---------------------------------------------------------------------------- #
 
@@ -53,7 +74,7 @@ def _upload_bf16(t_fp32: torch.Tensor, device) -> "ttnn.Tensor":
     """Upload an fp32 tensor as bf16 on device, TILE layout (required for matmul)."""
     return ttnn.from_torch(
         t_fp32,
-        dtype=ttnn.bfloat16,
+        dtype=_bf16_dtype(),
         layout=ttnn.TILE_LAYOUT,
         device=device,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -68,7 +89,7 @@ def markidis3_matmul(
     A_fp32: torch.Tensor,
     B_fp32: torch.Tensor,
     device,
-    accum_dtype=ttnn.bfloat16,
+    accum_dtype=None,
 ) -> torch.Tensor:
     """
     Compute A @ B at ~fp32 accuracy via 3 bf16 matmul passes on the FPU.
@@ -81,6 +102,8 @@ def markidis3_matmul(
     on-device in bf16 and only down-cast at the end).
     """
     assert A_fp32.dtype == torch.float32 and B_fp32.dtype == torch.float32
+    if accum_dtype is None:
+        accum_dtype = _bf16_dtype()
 
     A_hi_t, A_lo_t = split_fp32_to_bf16_pair(A_fp32)
     B_hi_t, B_lo_t = split_fp32_to_bf16_pair(B_fp32)
@@ -113,7 +136,7 @@ def bf16_matmul_baseline(A_fp32: torch.Tensor, B_fp32: torch.Tensor, device) -> 
     """1-mul bf16 matmul baseline (what the cryo-EM team is doing today)."""
     A = _upload_bf16(_round_to_bf16_torch(A_fp32), device)
     B = _upload_bf16(_round_to_bf16_torch(B_fp32), device)
-    C = ttnn.matmul(A, B, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    C = ttnn.matmul(A, B, dtype=_bf16_dtype(), memory_config=ttnn.DRAM_MEMORY_CONFIG)
     out = ttnn.to_torch(C).to(torch.float32)
     for t in (A, B, C):
         ttnn.deallocate(t)
