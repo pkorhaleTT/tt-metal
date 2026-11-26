@@ -97,13 +97,15 @@ def markidis3_matmul(
     B: (K, N) fp32 torch tensor on host.
     Returns: (M, N) fp32 torch tensor on host.
 
-    accum_dtype is the storage for each partial matmul output. bf16 is enough
-    because the three partials are added in fp32 on host (future: do the add
-    on-device in bf16 and only down-cast at the end).
+    CRITICAL: accum_dtype MUST be fp32. The partial products P2 = A_hi @ B_lo
+    and P3 = A_lo @ B_hi are small corrections (~1e-3 of P1's magnitude).
+    If stored in bf16, bf16's rounding completely erases those corrections
+    and Markidis degenerates back to a plain 1-mul bf16 matmul.
+    bf16 inputs + bf16 compute + fp32 output = the correct configuration.
     """
     assert A_fp32.dtype == torch.float32 and B_fp32.dtype == torch.float32
     if accum_dtype is None:
-        accum_dtype = _bf16_dtype()
+        accum_dtype = _fp32_dtype()  # fp32 storage is REQUIRED for precision recovery
 
     A_hi_t, A_lo_t = split_fp32_to_bf16_pair(A_fp32)
     B_hi_t, B_lo_t = split_fp32_to_bf16_pair(B_fp32)
