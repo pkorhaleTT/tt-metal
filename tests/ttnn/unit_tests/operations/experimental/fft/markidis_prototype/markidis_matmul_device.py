@@ -46,6 +46,53 @@ def _fp32_dtype():
     raise RuntimeError("Cannot locate ttnn float32 dtype in this ttnn build")
 
 
+_CACHED_HIFI4_CONFIG = None
+
+
+def _hifi4_compute_config(device=None):
+    """
+    Build a compute-kernel config that forces HiFi4 math + fp32 destination
+    accumulation. CRITICAL for Markidis: without fp32_dest_acc_en=True the
+    internal matmul accumulator rounds back to bf16 between tiles and the
+    precision benefit of split-bf16 is destroyed.
+    """
+    global _CACHED_HIFI4_CONFIG
+    if _CACHED_HIFI4_CONFIG is not None:
+        return _CACHED_HIFI4_CONFIG
+
+    # Preferred: arch-aware helper (works for WH and BH)
+    if device is not None and hasattr(ttnn, "init_device_compute_kernel_config"):
+        try:
+            _CACHED_HIFI4_CONFIG = ttnn.init_device_compute_kernel_config(
+                device.arch(),
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=False,
+            )
+            return _CACHED_HIFI4_CONFIG
+        except Exception:
+            pass
+
+    # Fallback: direct constructor (WH = BH alias in current ttnn)
+    for cls_name in ("WormholeComputeKernelConfig", "BlackholeComputeKernelConfig"):
+        cls = getattr(ttnn, cls_name, None)
+        if cls is not None:
+            try:
+                _CACHED_HIFI4_CONFIG = cls(
+                    math_fidelity=ttnn.MathFidelity.HiFi4,
+                    math_approx_mode=False,
+                    fp32_dest_acc_en=True,
+                    packer_l1_acc=False,
+                )
+                return _CACHED_HIFI4_CONFIG
+            except Exception:
+                continue
+
+    # Last resort: return None and let ttnn.matmul use defaults
+    return None
+
+
 # ---------------------------------------------------------------------------- #
 # bf16 split helpers (host-side)                                               #
 # ---------------------------------------------------------------------------- #
@@ -115,13 +162,20 @@ def markidis3_matmul(
     B_hi = _upload_bf16(B_hi_t, device)
     B_lo = _upload_bf16(B_lo_t, device)
 
-    # 3 bf16 matmul passes on FPU
-    P1 = ttnn.matmul(A_hi, B_hi, dtype=accum_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    P2 = ttnn.matmul(A_hi, B_lo, dtype=accum_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    P3 = ttnn.matmul(A_lo, B_hi, dtype=accum_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    # Force HiFi4 + fp32 destination accumulation on every matmul.
+    # Without this, matmul defaults to LoFi + bf16 dest and the Markidis
+    # precision recovery collapses back to plain bf16 accuracy.
+    kcfg = _hifi4_compute_config(device)
+    matmul_kw = dict(dtype=accum_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    if kcfg is not None:
+        matmul_kw["compute_kernel_config"] = kcfg
 
-    # Accumulate on device (two bf16 adds). This keeps precision bf16 at this step;
-    # upgrading the add to fp32 is a cheap future improvement.
+    # 3 bf16-input matmul passes on FPU, fp32-output storage
+    P1 = ttnn.matmul(A_hi, B_hi, **matmul_kw)
+    P2 = ttnn.matmul(A_hi, B_lo, **matmul_kw)
+    P3 = ttnn.matmul(A_lo, B_hi, **matmul_kw)
+
+    # fp32 + fp32 adds to preserve precision of the small correction terms
     S = ttnn.add(P1, P2)
     S = ttnn.add(S, P3)
 
@@ -138,7 +192,11 @@ def bf16_matmul_baseline(A_fp32: torch.Tensor, B_fp32: torch.Tensor, device) -> 
     """1-mul bf16 matmul baseline (what the cryo-EM team is doing today)."""
     A = _upload_bf16(_round_to_bf16_torch(A_fp32), device)
     B = _upload_bf16(_round_to_bf16_torch(B_fp32), device)
-    C = ttnn.matmul(A, B, dtype=_bf16_dtype(), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    kcfg = _hifi4_compute_config(device)
+    mm_kw = dict(dtype=_bf16_dtype(), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    if kcfg is not None:
+        mm_kw["compute_kernel_config"] = kcfg
+    C = ttnn.matmul(A, B, **mm_kw)
     out = ttnn.to_torch(C).to(torch.float32)
     for t in (A, B, C):
         ttnn.deallocate(t)
